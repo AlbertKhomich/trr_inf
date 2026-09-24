@@ -1,0 +1,41 @@
+import type { Metadata } from "next";
+import { Geist, Geist_Mono } from "next/font/google";
+import AuthProvider from "@/components/AuthProvider";
+import GraphBackground from "@/components/GraphBackground";
+import "katex/dist/katex.min.css";
+import "maplibre-gl/dist/maplibre-gl.css";
+import "./globals.css";
+
+const geistSans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
+export const metadata: Metadata = {
+  title: "UNI-KG",
+  description: "Knowledge graph representaion of papers UNI Paderborn",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="en">
+      <body
+        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+      >
+        <GraphBackground />
+        <div className="app-content">
+          <AuthProvider>{children}</AuthProvider>
+        </div>
+      </body>
+    </html>
+  );
+}

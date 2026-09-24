@@ -1,0 +1,1007 @@
+import { NextResponse } from "next/server";
+import {
+  buildCountryIndex,
+  canonicalizeCountryCode,
+  COUNTRY_ALIASES,
+  COUNTRY_CODE_ALIASES,
+  normalizeCountryLookup,
+} from "@/lib/country";
+import { toErrorMessage } from "@/lib/errors";
+import { excludeSammelbandPattern } from "@/lib/publicationFilters";
+import { escapeSparqlStringLiteral, sparqlSelect, SparqlRow } from "@/lib/sparql";
+import { toDisplayName } from "@/lib/format";
+import { paperIriFromId } from "@/lib/papers";
+import { buildAuthorIriCandidates, extractDirectAuthorIri } from "@/lib/query";
+
+const PREFIXES = `
+PREFIX schema: <https://schema.org/>
+`;
+const PAPER_RESOURCE_FILTER = `FILTER(REGEX(STR(?paper), "/id/(publication|venue)(/|$)"))`;
+const EXCLUDE_SAMMELBAND_FILTER = excludeSammelbandPattern("?paper");
+const PUBLICATION_OR_VENUE_PATH_REGEX = /\/id\/(?:publication|venue)(?:\/|$)/i;
+
+const CACHE_TTL_MS = 60_000;
+type SearchAuthorRef = {
+  id: string;
+  iri: string;
+};
+
+type SearchResultItem = {
+  id: string;
+  iri: string;
+  title: string;
+  year?: string;
+  authorsText: string;
+  authors: SearchAuthorRef[];
+};
+
+type SearchPayload = {
+  items: SearchResultItem[];
+  total: number;
+  nextCursor: string | null;
+  authorIri?: string;
+  authorName?: string;
+};
+
+type SearchCursor = {
+  nameSort: string;
+  paper: string;
+};
+
+type YearRangeFilter = {
+  from: string;
+  to: string;
+};
+
+type CacheEntry = { ts: number; value: SearchPayload };
+const cache = new Map<string, CacheEntry>();
+
+function cacheGet(key: string): SearchPayload | null {
+    const e = cache.get(key);
+    if (!e) return null;
+    if (Date.now() - e.ts > CACHE_TTL_MS) {
+        cache.delete(key);
+        return null;
+    }
+    return e.value;
+}
+function cacheSet(key: string, value: SearchPayload) {
+    if (cache.size > 300) cache.clear();
+    cache.set(key, { ts: Date.now(), value });
+}
+
+function rowNameSort(row: SparqlRow): string {
+  return (
+    row.nameSort?.value ??
+    row.cursorNameSort?.value ??
+    row.title?.value?.toLowerCase() ??
+    ""
+  ).trim();
+}
+
+function rowPaperIri(row: SparqlRow): string {
+  return (row.paper?.value ?? "").trim();
+}
+
+function compareRowsByCursorKey(a: SparqlRow, b: SparqlRow): number {
+  const nameCmp = rowNameSort(a).localeCompare(rowNameSort(b));
+  if (nameCmp !== 0) return nameCmp;
+  return rowPaperIri(a).localeCompare(rowPaperIri(b));
+}
+
+function encodeSearchCursor(cursor: SearchCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeSearchCursor(raw: string): SearchCursor | null {
+  const input = (raw ?? "").trim();
+  if (!input) return null;
+
+  try {
+    const json = Buffer.from(input, "base64url").toString("utf8");
+    const parsed = JSON.parse(json) as Partial<SearchCursor>;
+    const nameSort = typeof parsed.nameSort === "string" ? parsed.nameSort.trim() : "";
+    const paper = typeof parsed.paper === "string" ? parsed.paper.trim() : "";
+    if (!nameSort || !paper) return null;
+    return { nameSort, paper };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeYearParam(raw: string | null): string {
+  const value = (raw ?? "").trim();
+  return /^\d{4}$/.test(value) ? value : "";
+}
+
+function readYearRange(url: URL): YearRangeFilter | null {
+  let from = normalizeYearParam(url.searchParams.get("yearFrom"));
+  let to = normalizeYearParam(url.searchParams.get("yearTo"));
+  if (!from && !to) return null;
+  if (from && to && from > to) [from, to] = [to, from];
+  return { from, to };
+}
+
+function buildDatePublishedPattern(yearQ: string, yearRange: YearRangeFilter | null): string {
+  if (!yearQ && !yearRange) {
+    return `
+        OPTIONAL { ?paper schema:datePublished ?year0 . }
+        `;
+  }
+
+  const exactYearFilter = yearQ
+    ? `FILTER(STR(?year0) = ${escapeSparqlStringLiteral(yearQ)})`
+    : "";
+  const rangeFilter = yearRange
+    ? `
+        BIND(SUBSTR(STR(?year0), 1, 4) AS ?yearText)
+        FILTER(REGEX(?yearText, "^\\\\d{4}$"))
+        ${yearRange.from ? `FILTER(?yearText >= ${escapeSparqlStringLiteral(yearRange.from)})` : ""}
+        ${yearRange.to ? `FILTER(?yearText <= ${escapeSparqlStringLiteral(yearRange.to)})` : ""}
+        `
+    : "";
+
+  return `
+        ?paper schema:datePublished ?year0 .
+        ${exactYearFilter}
+        ${rangeFilter}
+        `;
+}
+
+function normalizeLooseText(value: string): string {
+  return (value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function buildNormalizedStringBind(sourceExpr: string, targetVar: string): string {
+  return `
+    BIND(
+      REPLACE(
+        REPLACE(LCASE(STR(${sourceExpr})), "[^a-z0-9]+", " "),
+        "^ +| +$",
+        ""
+      ) AS ${targetVar}
+    )
+  `;
+}
+
+
+function extractRisIdFromAnything(input: string): string | null {
+  const s0 = (input ?? "").trim();
+  if (!s0) return null;
+
+  const s = s0.replace(/[)>.,;]+$/, ""); // remove trailing punctuation
+
+  // Capture EVERYTHING after /ris/ (including slashes) until ?/#/end
+  const m = s.match(/\/id\/publication\/ris\/(.+?)(?:[?#].*)?$/);
+  if (m?.[1]) return m[1];
+
+  const m2 = s.match(/^(?:ris|id)\s*:\s*([^\s]+)\s*$/i);
+  if (m2?.[1]) return m2[1];
+
+  if (/^\d+$/.test(s) && s.length !== 4) return s;
+
+  return null;
+}
+
+function extractDirectPaperIri(input: string): string | null {
+  const s = (input ?? "").trim();
+  if (!s) return null;
+
+  const iriMatch = s.match(/^(<)?(https?:\/\/\S+?)\1?$/i);
+  if (!iriMatch?.[2]) return null;
+
+  const iri = iriMatch[2].replace(/[)>.,;]+$/, "");
+  try {
+    const parsed = new URL(iri);
+    if (!PUBLICATION_OR_VENUE_PATH_REGEX.test(parsed.pathname)) return null;
+    return iri;
+  } catch {
+    return null;
+  }
+}
+
+function buildDirectAuthorIriFilter(directAuthorIri: string): string {
+  const candidates = buildAuthorIriCandidates(directAuthorIri);
+  if (candidates.length === 0) return "";
+  if (candidates.length === 1) return `?paper schema:author <${candidates[0]}> .`;
+
+  const values = candidates.map((candidate) => `<${candidate}>`).join(" ");
+  return `
+    VALUES ?directAuthorIri { ${values} }
+    ?paper schema:author ?directAuthorIri .
+  `;
+}
+
+function buildDirectAuthorNameQuery(directAuthorIri: string): string | null {
+  const candidates = buildAuthorIriCandidates(directAuthorIri);
+  if (candidates.length === 0) return null;
+
+  const values = candidates
+    .map((candidate, idx) => `(<${candidate}> ${idx})`)
+    .join(" ");
+
+  return `${PREFIXES}
+  SELECT ?author ?name
+  WHERE {
+    VALUES (?author ?rank) { ${values} }
+    ?author schema:name ?name .
+  }
+  ORDER BY ?rank
+  LIMIT 1
+  `;
+}
+
+async function resolveDirectAuthorName(directAuthorIri: string): Promise<{ iri: string; name: string } | null> {
+  const q = buildDirectAuthorNameQuery(directAuthorIri);
+  if (!q) return null;
+
+  try {
+    const rows = await sparqlSelect(q);
+    const iri = (rows[0]?.author?.value ?? "").trim();
+    const name = (rows[0]?.name?.value ?? "").trim();
+    if (!iri || !name) return null;
+    return { iri, name };
+  } catch {
+    return null;
+  }
+}
+
+
+type ParsedOmni = {
+  titleQ: string;
+  authorQ: string;
+  yearQ: string;
+  affiliationQ: string;
+  countryQ: string;
+  countryCodes: string[];
+  directPaperIri: string | null;
+  directRisId: string | null;
+  directAuthorIri: string | null;
+};
+
+type FilterToken = "author" | "year" | "affiliation" | "country";
+
+const TOKEN_REGEX = /\b(author|a|year|y|affiliation|aff|af|country|c|cc)\s*:\s*/gi;
+const TOKEN_MAP: Record<string, FilterToken> = {
+  author: "author",
+  a: "author",
+  year: "year",
+  y: "year",
+  affiliation: "affiliation",
+  aff: "affiliation",
+  af: "affiliation",
+  country: "country",
+  c: "country",
+  cc: "country",
+};
+
+function addCountryCodeWithAliases(out: Set<string>, rawCode: string) {
+  const code = (rawCode ?? "").trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(code)) return;
+
+  const canonical = canonicalizeCountryCode(code);
+  if (KNOWN_COUNTRY_CODES.size > 0 && !KNOWN_COUNTRY_CODES.has(canonical)) return;
+  out.add(canonical);
+  out.add(code);
+
+  for (const [alias, target] of Object.entries(COUNTRY_CODE_ALIASES)) {
+    if (canonicalizeCountryCode(alias) === canonical) out.add(alias);
+    if (canonicalizeCountryCode(target) === canonical) out.add(target.toUpperCase());
+  }
+}
+
+const COUNTRY_INDEX = buildCountryIndex();
+const KNOWN_COUNTRY_CODES = new Set<string>(COUNTRY_INDEX.map((entry) => entry.code));
+
+const COUNTRY_VARIANTS_BY_CODE: Map<string, string[]> = (() => {
+  const byCode = new Map<string, Set<string>>();
+
+  const addVariant = (code: string, variant: string) => {
+    const c = (code ?? "").trim().toUpperCase();
+    const v = normalizeCountryLookup(variant);
+    if (!c || !v) return;
+    if (!byCode.has(c)) byCode.set(c, new Set<string>());
+    byCode.get(c)?.add(v);
+  };
+
+  for (const entry of COUNTRY_INDEX) {
+    addVariant(entry.code, entry.normalizedName);
+  }
+
+  for (const [alias, codes] of Object.entries(COUNTRY_ALIASES)) {
+    for (const code of codes) addVariant(code, alias);
+  }
+
+  for (const [aliasCode, canonicalCodeRaw] of Object.entries(COUNTRY_CODE_ALIASES)) {
+    const canonicalCode = canonicalizeCountryCode(canonicalCodeRaw);
+    addVariant(aliasCode, aliasCode);
+    addVariant(aliasCode, canonicalCode);
+    addVariant(canonicalCode, aliasCode);
+  }
+
+  for (const [code] of byCode) addVariant(code, code);
+
+  const out = new Map<string, string[]>();
+  for (const [code, variants] of byCode) {
+    out.set(code, Array.from(variants));
+  }
+  return out;
+})();
+
+function resolveCountryCodes(raw: string): string[] {
+  const value = (raw ?? "").trim();
+  if (!value) return [];
+
+  const out = new Set<string>();
+  const directCodes = value.toUpperCase().match(/\b[A-Z]{2}\b/g) ?? [];
+  for (const code of directCodes) addCountryCodeWithAliases(out, code);
+
+  const compact = value.toUpperCase().replace(/[^A-Z]/g, "");
+  if (/^[A-Z]{2}$/.test(compact)) addCountryCodeWithAliases(out, compact);
+
+  const normalized = normalizeCountryLookup(value);
+  if (normalized) {
+    const aliased = COUNTRY_ALIASES[normalized] ?? [];
+    for (const code of aliased) addCountryCodeWithAliases(out, code);
+
+    for (const entry of COUNTRY_INDEX) {
+      if (
+        entry.normalizedName === normalized ||
+        (normalized.length >= 3 && entry.normalizedName.includes(normalized))
+      ) {
+        addCountryCodeWithAliases(out, entry.code);
+      }
+    }
+  }
+
+  return Array.from(out).sort();
+}
+
+function extractTokenizedFilters(input: string): {
+  titleQ: string;
+  authorQ: string;
+  yearQ: string;
+  affiliationQ: string;
+  countryQ: string;
+} {
+  const s = input ?? "";
+
+  const hits: Array<{ start: number; valueStart: number; token: FilterToken }> = [];
+  TOKEN_REGEX.lastIndex = 0;
+  let m: RegExpExecArray | null = null;
+  while ((m = TOKEN_REGEX.exec(s)) !== null) {
+    const token = TOKEN_MAP[(m[1] ?? "").toLowerCase()];
+    if (!token) continue;
+    hits.push({ start: m.index, valueStart: TOKEN_REGEX.lastIndex, token });
+  }
+
+  if (hits.length === 0) {
+    return { titleQ: s.trim(), authorQ: "", yearQ: "", affiliationQ: "", countryQ: "" };
+  }
+
+  const values: Record<FilterToken, string[]> = {
+    author: [],
+    year: [],
+    affiliation: [],
+    country: [],
+  };
+  const titleParts: string[] = [];
+  let cursor = 0;
+
+  for (let i = 0; i < hits.length; i += 1) {
+    const cur = hits[i];
+    if (cur.start > cursor) titleParts.push(s.slice(cursor, cur.start));
+
+    const nextStart = i + 1 < hits.length ? hits[i + 1].start : s.length;
+    const rawValue = s.slice(cur.valueStart, nextStart).trim();
+    if (rawValue) values[cur.token].push(rawValue);
+    cursor = nextStart;
+  }
+
+  const titleQ = titleParts.join(" ").replace(/\s+/g, " ").trim();
+  const last = (arr: string[]) => arr[arr.length - 1] ?? "";
+
+  return {
+    titleQ,
+    authorQ: last(values.author),
+    yearQ: last(values.year),
+    affiliationQ: last(values.affiliation),
+    countryQ: last(values.country),
+  };
+}
+
+function parseOmni(raw: string): ParsedOmni {
+  const s = (raw ?? "").trim();
+
+  const directPaperIri = extractDirectPaperIri(s);
+  if (directPaperIri) {
+    return {
+      titleQ: "",
+      authorQ: "",
+      yearQ: "",
+      affiliationQ: "",
+      countryQ: "",
+      countryCodes: [],
+      directPaperIri,
+      directRisId: null,
+      directAuthorIri: null,
+    };
+  }
+
+  const directRisId = extractRisIdFromAnything(s);
+  if (directRisId) {
+    return {
+      titleQ: "",
+      authorQ: "",
+      yearQ: "",
+      affiliationQ: "",
+      countryQ: "",
+      countryCodes: [],
+      directPaperIri: null,
+      directRisId,
+      directAuthorIri: null,
+    };
+  }
+
+  const directAuthorIriFromRaw = extractDirectAuthorIri(s);
+  if (directAuthorIriFromRaw) {
+    return {
+      titleQ: "",
+      authorQ: "",
+      yearQ: "",
+      affiliationQ: "",
+      countryQ: "",
+      countryCodes: [],
+      directPaperIri: null,
+      directRisId: null,
+      directAuthorIri: directAuthorIriFromRaw,
+    };
+  }
+
+  if (/^\d{4}$/.test(s)) {
+    return {
+      titleQ: "",
+      authorQ: "",
+      yearQ: s,
+      affiliationQ: "",
+      countryQ: "",
+      countryCodes: [],
+      directPaperIri: null,
+      directRisId: null,
+      directAuthorIri: null,
+    };
+  }
+
+  const extracted = extractTokenizedFilters(s);
+
+  let titleQ = extracted.titleQ;
+  let authorQ = extracted.authorQ;
+  let yearQ = "";
+  let directAuthorIri: string | null = null;
+
+  if (authorQ) {
+    const iriMatch = authorQ.match(/^(<)?(https?:\/\/\S+?)\1?$/i);
+    if (iriMatch?.[2]) {
+      directAuthorIri = iriMatch[2].trim().replace(/[)>.,;]+$/, "");
+      authorQ = "";
+    }
+  }
+
+  if (extracted.yearQ) {
+    const m = extracted.yearQ.match(/\b(\d{4})\b/);
+    if (m?.[1]) yearQ = m[1];
+  }
+
+  if (!yearQ) {
+    const looseYear = titleQ.match(/\b(\d{4})\b/);
+    if (looseYear?.[1]) {
+      yearQ = looseYear[1];
+      titleQ = titleQ.replace(looseYear[0], " ").replace(/\s+/g, " ").trim();
+    }
+  }
+
+  const countryQ = extracted.countryQ.trim();
+  const countryCodes = resolveCountryCodes(countryQ);
+
+  return {
+    titleQ: titleQ.trim(),
+    authorQ: authorQ.trim(),
+    yearQ,
+    affiliationQ: extracted.affiliationQ.trim(),
+    countryQ,
+    countryCodes,
+    directPaperIri: null,
+    directRisId: null,
+    directAuthorIri,
+  };
+}
+
+function buildTrr318Filter(enabled: boolean): string {
+  return enabled ? `
+    FILTER EXISTS {
+      ?paper <https://schema.org/keywords> ?trr318Keyword .
+      FILTER(CONTAINS(LCASE(STR(?trr318Keyword)), "trr_318"))
+    }
+  ` : "";
+}
+
+function buildDirectQuery(paperIri: string, trr318Enabled: boolean) {
+    return `${PREFIXES}
+    SELECT
+      ?paper
+      (SAMPLE(?name) AS ?title)
+      (SAMPLE(?year0) AS ?year)
+      (GROUP_CONCAT(DISTINCT ?aNamePick; separator=";") AS ?authors)
+      (GROUP_CONCAT(DISTINCT STR(?a); separator="|") AS ?authorIris)
+    WHERE {
+      BIND(<${paperIri}> AS ?paper)
+      ${buildTrr318Filter(trr318Enabled)}
+      ${EXCLUDE_SAMMELBAND_FILTER}
+      OPTIONAL { ?paper schema:name ?name . }
+      OPTIONAL { ?paper schema:datePublished ?year0 . }
+      optional {
+        {
+          select ?paper ?a (min(str(?aName)) as ?aNamePick)
+          where {
+            ?paper schema:author ?a .
+            optional { ?a schema:name ?aName . }
+          }
+            group by ?paper ?a
+        }
+      }
+    }
+    GROUP BY ?paper
+    LIMIT 1
+    `;
+}
+
+function buildAuthorJoinPattern(authorQ: string): string {
+  if (!authorQ) return "";
+
+  const v = authorQ.trim();
+  const iriMatch = v.match(/^(<)?(https?:\/\/\S+?)\1?$/i);
+  if (iriMatch?.[2]) {
+    const authorIri = iriMatch[2].replace(/[)>.,;]+$/, "");
+    return `
+      ?paper schema:author <${authorIri}> .
+    `;
+  }
+
+  const authorLit = escapeSparqlStringLiteral(v);
+  const normalizedAuthor = normalizeLooseText(v);
+  const normalizedAuthorLit = escapeSparqlStringLiteral(normalizedAuthor);
+  const normalizedAuthorTokens = Array.from(
+    new Set(normalizedAuthor.split(" ").map((part) => part.trim()).filter(Boolean)),
+  );
+  const normalizedAuthorTokenFilter =
+    normalizedAuthorTokens.length > 1
+      ? normalizedAuthorTokens
+          .map((token) => `CONTAINS(?aaName1Norm1, ${escapeSparqlStringLiteral(token)})`)
+          .join("\n      && ")
+      : "";
+  return `
+    ?paper schema:author ?aa1 .
+    ?aa1 schema:name ?aaName1 .
+    ${buildNormalizedStringBind("?aaName1", "?aaName1Norm1")}
+    FILTER(
+      CONTAINS(LCASE(STR(?aaName1)), LCASE(${authorLit}))
+      || CONTAINS(?aaName1Norm1, ${normalizedAuthorLit})
+      ${normalizedAuthorTokenFilter ? `|| (\n      ${normalizedAuthorTokenFilter}\n    )` : ""}
+    )
+  `;
+}
+
+function buildAffiliationJoinPattern(affiliationQ: string): string {
+  if (!affiliationQ) return "";
+
+  const v = affiliationQ.trim();
+  const iriMatch = v.match(/^(<)?(https?:\/\/\S+?)\1?$/i);
+  if (iriMatch?.[2]) {
+    const affiliationIri = iriMatch[2].replace(/[)>.,;]+$/, "");
+    return `
+      ?paper schema:author ?aa2 .
+      ?aa2 schema:affiliation <${affiliationIri}> .
+    `;
+  }
+
+  const affiliationLit = escapeSparqlStringLiteral(v);
+  return `
+    ?paper schema:author ?aa2 .
+    ?aa2 schema:affiliation ?aff2 .
+    OPTIONAL { ?aff2 schema:name ?affName2 . }
+    FILTER(CONTAINS(LCASE(STR(COALESCE(?affName2, ?aff2))), LCASE(${affiliationLit})))
+  `;
+}
+
+function buildCountryJoinPattern(countryQ: string, countryCodes: string[]): string {
+  if (!countryQ && countryCodes.length === 0) return "";
+
+  const ccVar = "?cc0";
+  const ccNormVar = "?ccNorm0";
+  const affVar = "?aff0";
+  const aaVar = "?aa0";
+
+  const normBind = `
+    BIND(
+      REPLACE(
+        REPLACE(LCASE(STR(${ccVar})), "[^a-z0-9]+", " "),
+        "^ +| +$",
+        ""
+      ) AS ${ccNormVar}
+    )
+  `;
+
+  const countrySource = `
+    ${aaVar} schema:affiliation ${affVar} .
+    {
+      ${affVar} schema:addressCountry ${ccVar} .
+    }
+    UNION
+    {
+      ${affVar} schema:address/schema:addressCountry ${ccVar} .
+    }
+  `;
+
+  if (countryCodes.length > 0) {
+    const codeList = countryCodes
+      .map((code) => escapeSparqlStringLiteral(code.toUpperCase()))
+      .join(", ");
+
+    const normalizedVariants = new Set<string>();
+    for (const code of countryCodes.map((x) => x.toUpperCase())) {
+      normalizedVariants.add(normalizeCountryLookup(code));
+      const variants = COUNTRY_VARIANTS_BY_CODE.get(code) ?? [];
+      for (const variant of variants) normalizedVariants.add(variant);
+    }
+    const normalizedCountryQ = normalizeCountryLookup(countryQ);
+    if (normalizedCountryQ) normalizedVariants.add(normalizedCountryQ);
+
+    const variantList = Array.from(normalizedVariants)
+      .filter(Boolean)
+      .map((variant) => escapeSparqlStringLiteral(variant))
+      .join(", ");
+
+    return `
+      ?paper schema:author ${aaVar} .
+      ${countrySource}
+      ${normBind}
+      FILTER(
+        UCASE(STR(${ccVar})) IN (${codeList})
+        ${variantList ? `|| ${ccNormVar} IN (${variantList})` : ""}
+      )
+    `;
+  }
+
+  const countryLit = escapeSparqlStringLiteral(countryQ.trim());
+  const normalizedLit = escapeSparqlStringLiteral(normalizeCountryLookup(countryQ));
+  return `
+    ?paper schema:author ${aaVar} .
+    ${countrySource}
+    ${normBind}
+    FILTER(
+      CONTAINS(LCASE(STR(${ccVar})), LCASE(${countryLit}))
+      ${normalizedLit ? `|| CONTAINS(${ccNormVar}, ${normalizedLit})` : ""}
+    )
+  `;
+}
+
+function buildSearchQuery(args: {
+    titleQ: string;
+    authorQ: string;
+    yearQ: string;
+    affiliationQ: string;
+    countryQ: string;
+    countryCodes: string[];
+    yearRange: YearRangeFilter | null;
+    trr318Enabled: boolean;
+    directAuthorIri?: string | null;
+    mode: "starts" | "contains";
+    limit: number;
+    offset: number;
+    cursor: SearchCursor | null;
+}) {
+    const {
+      titleQ,
+      authorQ,
+      yearQ,
+      affiliationQ,
+      countryQ,
+      countryCodes,
+      yearRange,
+      trr318Enabled,
+      directAuthorIri,
+      mode,
+      limit,
+      offset,
+      cursor,
+    } = args;
+
+    const titleLit = titleQ ? escapeSparqlStringLiteral(titleQ) : "";
+
+    const titleFilter = 
+    titleQ
+      ? (mode === "starts"
+          ? `FILTER(STRSTARTS(LCASE(STR(?name)), LCASE(${titleLit})))`
+          : `FILTER(CONTAINS(LCASE(STR(?name)), LCASE(${titleLit})))`)
+      : "";
+
+    const yearPattern = buildDatePublishedPattern(yearQ, yearRange);
+
+    const authorIriFilter = directAuthorIri ? buildDirectAuthorIriFilter(directAuthorIri) : "";
+
+    const authorJoinPattern = buildAuthorJoinPattern(authorQ);
+    const affiliationJoinPattern = buildAffiliationJoinPattern(affiliationQ);
+    const countryJoinPattern = buildCountryJoinPattern(countryQ, countryCodes);
+    const cursorHaving = cursor
+      ? `
+        HAVING (
+          (MIN(?nameSort0) > ${escapeSparqlStringLiteral(cursor.nameSort)})
+          ||
+          (
+            MIN(?nameSort0) = ${escapeSparqlStringLiteral(cursor.nameSort)}
+            && STR(?paper) > ${escapeSparqlStringLiteral(cursor.paper)}
+          )
+        )
+        `
+      : "";
+    const offsetClause = cursor ? "" : `OFFSET ${offset}`;
+    
+
+    return `${PREFIXES}
+    SELECT
+      ?paper
+      ?nameSort
+      (SAMPLE(?name) AS ?title)
+      (SAMPLE(?year0) AS ?year)
+      (GROUP_CONCAT(DISTINCT ?aNamePick; separator=";") AS ?authors)
+      (GROUP_CONCAT(DISTINCT STR(?a); separator="|") AS ?authorIris)
+    WHERE {
+      {
+        SELECT ?paper (MIN(?nameSort0) AS ?nameSort)
+        WHERE {
+          ${PAPER_RESOURCE_FILTER}
+          ${EXCLUDE_SAMMELBAND_FILTER}
+
+          ${authorIriFilter}
+
+          ?paper schema:name ?name .
+          BIND(LCASE(STR(?name)) AS ?nameSort0)
+          ${titleFilter}
+          ${yearPattern}
+          ${authorJoinPattern}
+          ${affiliationJoinPattern}
+          ${countryJoinPattern}
+          ${buildTrr318Filter(trr318Enabled)}
+        }
+        GROUP BY ?paper
+        ${cursorHaving}
+        ORDER BY ?nameSort ?paper
+        LIMIT ${limit}
+        ${offsetClause}
+      }
+
+      OPTIONAL { ?paper schema:name ?name . }
+      OPTIONAL { ?paper schema:datePublished ?year0 . }
+      optional {
+        {
+          select ?paper ?a (min(str(?aName)) as ?aNamePick)
+          where {
+            ?paper schema:author ?a .
+            optional { ?a schema:name ?aName . }
+          }
+            group by ?paper ?a
+        }
+      }
+    }
+    GROUP BY ?paper ?nameSort
+    ORDER BY ?nameSort ?paper
+    `;
+}
+
+function buildCountQuery(args: {
+    titleQ: string;
+    authorQ: string;
+    yearQ: string;
+    affiliationQ: string;
+    countryQ: string;
+    countryCodes: string[];
+    yearRange: YearRangeFilter | null;
+    trr318Enabled: boolean;
+    directAuthorIri?: string | null;
+    mode: "starts" | "contains";
+}) {
+    const { titleQ, authorQ, yearQ, affiliationQ, countryQ, countryCodes, yearRange, trr318Enabled, directAuthorIri, mode } = args;
+
+    const titleLit = titleQ ? escapeSparqlStringLiteral(titleQ) : "";
+
+    const titleFilter =
+      titleQ
+        ? (mode === "starts"
+            ? `FILTER(STRSTARTS(LCASE(STR(?name)), LCASE(${titleLit})))`
+            : `FILTER(CONTAINS(LCASE(STR(?name)), LCASE(${titleLit})))`)
+        : "";
+
+    const yearPattern = buildDatePublishedPattern(yearQ, yearRange);
+
+    const authorIriFilter = directAuthorIri ? buildDirectAuthorIriFilter(directAuthorIri) : "";
+
+    const authorJoinPattern = buildAuthorJoinPattern(authorQ);
+    const affiliationJoinPattern = buildAffiliationJoinPattern(affiliationQ);
+    const countryJoinPattern = buildCountryJoinPattern(countryQ, countryCodes);
+
+    return `${PREFIXES}
+    SELECT (COUNT(DISTINCT ?paper) AS ?total)
+    WHERE {
+      ${PAPER_RESOURCE_FILTER}
+      ${EXCLUDE_SAMMELBAND_FILTER}
+
+      ${authorIriFilter}
+
+      ?paper schema:name ?name .
+      ${titleFilter}
+      ${yearPattern}
+      ${authorJoinPattern}
+      ${affiliationJoinPattern}
+      ${countryJoinPattern}
+      ${buildTrr318Filter(trr318Enabled)}
+    }
+    `;
+}
+
+function toPaperId(paperIri: string): string {
+  const m = paperIri.match(/\/ris\/(.+?)(?:[?#].*)?$/);
+  if (m?.[1]) return m[1];
+  return paperIri;
+}
+
+function toPersonId(personIri: string): string {
+    const m = 
+        personIri.match(/\/hash\/([^\/#]+)\s*$/) ??
+        personIri.match(/\/uni\/([^\/#]+)\s*$/);
+    return m?.[1] ?? personIri;
+}
+
+export async function GET(req: Request) {
+    try {
+        const url = new URL(req.url);
+        const raw = (url.searchParams.get("q") ?? url.searchParams.get("title") ?? "").trim();
+        const yearRange = readYearRange(url);
+        const trr318Enabled = url.searchParams.get("trr318") === "true";
+        if (!raw && !yearRange && !trr318Enabled) return NextResponse.json({ items: [], total: 0, nextCursor: null });
+
+        if (raw.length > 300) return NextResponse.json({ error: "Querry too long" }, {status: 400 });
+        const rawCursor = (url.searchParams.get("cursor") ?? "").trim();
+        const cursor = decodeSearchCursor(rawCursor);
+        const offset = Math.max(0, Number(url.searchParams.get("offset") ?? "0") || 0);
+        const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") ?? "25") || 25));
+        const fetchLimit = Math.min(101, limit + 1);
+        const effectiveOffset = cursor ? 0 : offset;
+
+        const parsed = parseOmni(raw);
+        
+        const cacheKey = 
+          `t=${parsed.titleQ.toLowerCase()}|a=${parsed.authorQ.toLowerCase()}|y=${parsed.yearQ}|yf=${yearRange?.from ?? ""}|yt=${yearRange?.to ?? ""}|af=${parsed.affiliationQ.toLowerCase()}|c=${parsed.countryQ.toLowerCase()}|cc=${parsed.countryCodes.join(",")}|pi=${(parsed.directPaperIri ?? "").toLowerCase()}|id=${parsed.directRisId ?? ""}|ai=${(parsed.directAuthorIri ?? "").toLowerCase()}|trr318=${trr318Enabled}|cur=${rawCursor}|o=${effectiveOffset}|l=${limit}`;
+        const cached = cacheGet(cacheKey);
+        if (cached) return NextResponse.json(cached);
+        const directAuthorMetaPromise = parsed.directAuthorIri
+          ? resolveDirectAuthorName(parsed.directAuthorIri)
+          : Promise.resolve(null);
+    
+        let rows: SparqlRow[] = [];
+        let total = 0;
+    
+        if (parsed.directPaperIri || parsed.directRisId) {
+            const directPaperIri = parsed.directPaperIri ?? paperIriFromId(parsed.directRisId ?? "");
+            const allRows = await sparqlSelect(buildDirectQuery(directPaperIri, trr318Enabled));
+            total = allRows.length;
+            rows = !cursor && effectiveOffset === 0 ? allRows.slice(0, limit) : [];
+        } else {
+            if (
+              !parsed.titleQ &&
+              !parsed.authorQ &&
+              !parsed.yearQ &&
+              !yearRange &&
+              !trr318Enabled &&
+              !parsed.affiliationQ &&
+              !parsed.countryQ &&
+              !parsed.directAuthorIri
+            ) {
+                return NextResponse.json({ items: [], total: 0, nextCursor: null });
+            }
+
+            if (parsed.titleQ && parsed.titleQ.length < 3) {
+              return NextResponse.json({ items: [], total: 0, nextCursor: null });
+            }
+
+            let modeUsed: "starts" | "contains" = "starts";
+
+            const q1 = buildSearchQuery({
+              ...parsed,
+              yearRange,
+              trr318Enabled,
+              mode: modeUsed,
+              limit: fetchLimit,
+              offset: effectiveOffset,
+              cursor,
+            });
+            rows = await sparqlSelect(q1);
+            if (rows.length === 0 && parsed.titleQ) {
+                modeUsed = "contains";
+                rows = await sparqlSelect(
+                  buildSearchQuery({
+                    ...parsed,
+                    yearRange,
+                    trr318Enabled,
+                    mode: modeUsed,
+                    limit: fetchLimit,
+                    offset: effectiveOffset,
+                    cursor,
+                  }),
+                );
+            }
+
+            const countRows = await sparqlSelect(buildCountQuery({ ...parsed, yearRange, trr318Enabled, mode: modeUsed }));
+            total = Number(countRows[0]?.total?.value ?? 0) || 0;
+        }
+
+        if (rows.length > 1) rows = [...rows].sort(compareRowsByCursorKey);
+
+        const hasNextPage = rows.length > limit;
+        const pageRows = hasNextPage ? rows.slice(0, limit) : rows;
+        const nextCursor = (() => {
+          if (!hasNextPage || pageRows.length === 0) return null;
+          const last = pageRows[pageRows.length - 1];
+          const paper = rowPaperIri(last);
+          const nameSort = rowNameSort(last);
+          if (!paper || !nameSort) return null;
+          return encodeSearchCursor({ nameSort, paper });
+        })();
+    
+        const items = pageRows.map((row): SearchResultItem | null => {
+            const paperIri = row.paper?.value ?? "";
+            if (!paperIri) return null;
+
+            const authorIris = (row.authorIris?.value ?? "")
+              .split("|")
+              .filter(Boolean);
+            const rawAuthors = row.authors?.value ?? "";
+            const authorsText = rawAuthors
+                .split(";")
+                .map((s: string) => s.trim())
+                .filter(Boolean)
+                .map(toDisplayName)
+                .join(", ");
+            const year = row.year?.value;
+
+            return {
+                id: toPaperId(paperIri),
+                iri: paperIri,
+                title: row.title?.value ?? "",
+                ...(year ? { year } : {}),
+                authorsText,
+                authors: authorIris.map((iri: string) => ({ id: toPersonId(iri), iri })),
+            };
+        })
+        .filter((item): item is SearchResultItem => item !== null);
+
+        const directAuthorMeta = await directAuthorMetaPromise;
+        const payload: SearchPayload = {
+          items,
+          total,
+          nextCursor,
+          ...(directAuthorMeta
+            ? { authorIri: directAuthorMeta.iri, authorName: directAuthorMeta.name }
+            : {}),
+        };
+        cacheSet(cacheKey, payload);
+        return NextResponse.json(payload);
+    } catch (error: unknown) {
+        return NextResponse.json(
+            { error: toErrorMessage(error, "Unknown error") },
+            { status: 500 }
+        );
+    }
+}
