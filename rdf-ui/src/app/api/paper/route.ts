@@ -1,3 +1,4 @@
+import { trr318Pattern } from "@/lib/publicationFilters";
 import { NextResponse } from "next/server";
 import { toErrorMessage } from "@/lib/errors";
 import { sparqlSelect } from "@/lib/sparql";
@@ -61,6 +62,7 @@ export async function GET(req: Request) {
           (GROUP_CONCAT(DISTINCT STR(?license); separator="|") AS ?licenses)
         WHERE {
           BIND(<${paperIri}> AS ?paper)
+          ${trr318Pattern()}
 
           OPTIONAL { ?paper rdf:type ?type0 . }
           
@@ -120,6 +122,7 @@ export async function GET(req: Request) {
         (MIN(STR(?cc0)) AS ?countryRaw)
       WHERE {
         BIND(<${paperIri}> AS ?paper)
+          ${trr318Pattern()}
         ?paper schema:author ?a .
 
         OPTIONAL { ?a schema:name ?aName0 . }

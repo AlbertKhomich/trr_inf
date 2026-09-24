@@ -69,6 +69,16 @@ describe("GET /api/describe", () => {
     expect(mockedSparqlDescribe).toHaveBeenCalledWith(`DESCRIBE <${iri}>`);
   });
 
+  it("scopes publication deep links to TRR", async () => {
+    mockedSparqlDescribe.mockResolvedValue({ contentType: "text/turtle", body: "" });
+    const iri = "http://upbkg.data.dice-research.org/id/publication/ris/123";
+    const response = await GET(new Request(`http://localhost/api/describe?iri=${encodeURIComponent(iri)}`));
+    expect(response.status).toBe(200);
+    const query = mockedSparqlDescribe.mock.calls[0][0];
+    expect(query).toContain(`BIND(<${iri}> AS ?paper)`);
+    expect(query).toContain('"trr_318"');
+  });
+
   it("accepts uri alias and canonicalizes known upbkg paths", async () => {
     mockedSparqlDescribe.mockResolvedValue({
       contentType: "application/n-triples",

@@ -1,24 +1,12 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
 import AuthProvider from "@/components/AuthProvider";
-import GraphBackground from "@/components/GraphBackground";
 import "katex/dist/katex.min.css";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
 export const metadata: Metadata = {
-  title: "UNI-KG",
-  description: "Knowledge graph representaion of papers UNI Paderborn",
+  title: "TRR 318 | Research publications",
+  description: "Explore TRR 318 publications on Constructing Explainability.",
 };
 
 export default function RootLayout({
@@ -29,9 +17,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className="antialiased"
       >
-        <GraphBackground />
+        <div className="trr-background" aria-hidden="true" />
         <div className="app-content">
           <AuthProvider>{children}</AuthProvider>
         </div>

@@ -1,3 +1,4 @@
+import { trr318Pattern } from "@/lib/publicationFilters";
 import { NextResponse } from "next/server";
 import { toErrorMessage } from "@/lib/errors";
 import { canonicalizeUpbkgIri } from "@/lib/query";
@@ -24,7 +25,10 @@ export async function GET(req: Request) {
     const iri = parseDescribeIri(rawIri);
     if (!iri) return NextResponse.json({ error: "Missing or invalid iri" }, { status: 400 });
 
-    const query = `DESCRIBE <${iri}>`;
+    // Publication deep links must use the same fixed scope as search.
+    const query = /\/id\/(publication|venue)(\/|$)/i.test(new URL(iri).pathname)
+      ? `DESCRIBE ?paper WHERE { BIND(<${iri}> AS ?paper) ${trr318Pattern()} }`
+      : `DESCRIBE <${iri}>`;
     const payload = await sparqlDescribe(query);
     const parsed = parseDescribeBodyWithN3(payload.body, payload.contentType);
     return NextResponse.json({

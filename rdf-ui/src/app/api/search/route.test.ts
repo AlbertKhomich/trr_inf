@@ -24,13 +24,16 @@ describe("GET /api/search", () => {
     vi.useRealTimers();
   });
 
-  it("returns empty payload when query is missing", async () => {
-    const response = await GET(new Request("http://localhost/api/search"));
-    const body = await response.json();
-
+  it.each(["", "?trr318=false&offset=1"])("browses TRR publications by default (%s)", async (params) => {
+    mockedSparqlSelect.mockResolvedValue([]);
+    const response = await GET(new Request(`http://localhost/api/search${params}`));
     expect(response.status).toBe(200);
-    expect(body).toEqual({ items: [], total: 0, nextCursor: null });
-    expect(mockedSparqlSelect).not.toHaveBeenCalled();
+    expect(await response.json()).toEqual({ items: [], total: 0, nextCursor: null });
+    // Both result and count queries must retain the fixed scope.
+    expect(mockedSparqlSelect).toHaveBeenCalledTimes(2);
+    for (const [query] of mockedSparqlSelect.mock.calls) {
+      expect(query).toContain('CONTAINS(LCASE(STR(?trr318Keyword)), "trr_318")');
+    }
   });
 
   it("returns 400 for overly long queries", async () => {
@@ -108,6 +111,7 @@ describe("GET /api/search", () => {
     });
     const query = mockedSparqlSelect.mock.calls[0]?.[0] ?? "";
     expect(query).toContain(`BIND(<${paperIri}> AS ?paper)`);
+    expect(query).toContain('"trr_318"');
     expect(mockedSparqlSelect).toHaveBeenCalledTimes(1);
   });
 
@@ -220,6 +224,8 @@ describe("GET /api/search", () => {
     expect(searchQuery).toContain("http://upbkg.data.dice-research.org/vocab/publicationType");
     expect(searchQuery).toContain('"sammelband"');
     expect(countQuery).toContain("COUNT(DISTINCT ?paper)");
+    expect(searchQuery).toContain('"trr_318"');
+    expect(countQuery).toContain('"trr_318"');
     expect(countQuery).toContain("http://upbkg.data.dice-research.org/vocab/publicationType");
     expect(countQuery).toContain('"sammelband"');
   });

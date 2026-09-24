@@ -42,22 +42,21 @@ export default function SiteHeader({
   }
 
   return (
-    <header className={`flex items-start justify-between ${className}`}>
-      <a
-        aria-label="Open SPARQL endpoint"
-        className="inline-flex rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-4 dark:focus-visible:ring-offset-slate-950"
-        href="http://upbkg.data.dice-research.org/ui"
-        rel="noreferrer"
-        target="_blank"
+    <header className={`trr-header flex flex-wrap items-center justify-between gap-5 ${className}`}>
+      <Link
+        aria-label="TRR 318 home"
+        className="trr-logo-link rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        href="/"
       >
         <Image
-          alt="SPARQL endpoint"
-          height={48}
+          alt="TRR 318 — Constructing Explainability"
+          className="trr-logo h-auto"
+          height={93}
           priority
-          src="/sparql-96.png"
-          width={48}
+          src={isDark ? "/trr-logo-white.png" : "/trr-logo.png"}
+          width={320}
         />
-      </a>
+      </Link>
       <div className="flex items-center gap-2">
         <Link
           aria-label="Home"

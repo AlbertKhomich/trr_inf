@@ -9,9 +9,7 @@ import PageContainer from "@/components/PageContainer";
 import PaperResultsList from "@/components/PaperResultsList";
 import SearchControls from "@/components/SearchControls";
 import SiteHeader from "@/components/SiteHeader";
-import UsersByCountryWidget from "@/components/CountryWidget";
 import { useDescribeState } from "@/hooks/useDescribeState";
-import { useCountryStats } from "@/hooks/useCountryStats";
 import { useDebounce } from "@/hooks/useDebounce";
 import { useSearchState } from "@/hooks/useSearchState";
 import { useTheme } from "@/hooks/useTheme";
@@ -228,7 +226,6 @@ export default function HomePage() {
   const router = useRouter();
   const { status: authStatus } = useSession();
   const [q, setQ] = useState("");
-  const [trr318Enabled, setTrr318Enabled] = useState(false);
   const [yearRange, setYearRange] = useState<SearchYearRange>(["", ""]);
   const [describeIri, setDescribeIri] = useState<string | null>(null);
   const [aiEnabled, setAiEnabled] = useState(false);
@@ -244,13 +241,7 @@ export default function HomePage() {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const ragInitializationStartedRef = useRef(false);
 
-  const { isDark, setTheme, theme } = useTheme();
-  const {
-    countryErr,
-    countryLoading,
-    countryRowsWithColors,
-    totalPapers,
-  } = useCountryStats(theme);
+  const { isDark, setTheme } = useTheme();
 
   const activeAuthorIri = useMemo(() => {
     const iri = extractDirectAuthorIri(q);
@@ -286,7 +277,7 @@ export default function HomePage() {
     debouncedAuthorIri,
     yearFrom,
     yearTo,
-    trr318Enabled: !aiEnabled && trr318Enabled,
+    enabled: !aiEnabled && !describeIri,
   });
   const {
     body: describeBody,
@@ -307,7 +298,7 @@ export default function HomePage() {
     ? "What would you like to know?"
     : activeAuthorIri && activeAuthorName
       ? `${toPossessive(activeAuthorName)} Papers | Total: ${searchTotal}`
-      : "Papers";
+      : "Research publications";
 
   const subtleTextClass = isDark ? "text-gray-400" : "text-gray-500";
   const searchInputClass = isDark
@@ -350,15 +341,6 @@ export default function HomePage() {
     const current = q.trimEnd();
     const separator = current.length > 0 ? " " : "";
     const next = `${current}${separator}${prefix} `;
-    setDescribeIri(null);
-    setQ(next);
-    focusSearchInput(next.length);
-  }
-
-  function handleCountryClick(countryCode: string): void {
-    const code = (countryCode || "").trim().toUpperCase();
-    if (!code) return;
-    const next = `c: ${code}`;
     setDescribeIri(null);
     setQ(next);
     focusSearchInput(next.length);
@@ -551,21 +533,11 @@ export default function HomePage() {
         onToggleTheme={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
       />
 
-      <div className="mb-6">
-        {countryErr ? (
-          <div className="mb-3 text-sm text-red-600">{countryErr}</div>
-        ) : null}
-
-        <UsersByCountryWidget
-          loading={countryLoading}
-          rows={countryRowsWithColors}
-          theme={theme}
-          totalOverride={totalPapers}
-          onCountryClick={handleCountryClick}
-        />
-      </div>
-
-      <h1 className="mb-3 text-[26px] font-semibold">{headingText}</h1>
+      <section className="trr-intro">
+        <p className="trr-eyebrow">TRR 318 · Constructing Explainability</p>
+        <h1 className="text-3xl font-bold sm:text-4xl">{headingText}</h1>
+        <p className="mt-3 text-sm sm:text-base">Explore publications from our collaborative research on explainable AI.</p>
+      </section>
 
       <SearchControls
         aiAnswer={aiAnswer}
@@ -587,8 +559,6 @@ export default function HomePage() {
         onQueryChange={handleQueryChange}
         onRequestUpload={handleRequestUpload}
         onToggleAi={handleToggleAi}
-        onToggleTrr318={setTrr318Enabled}
-        trr318Enabled={trr318Enabled}
         onUploadDocument={handleUploadDocument}
         onYearRangeChange={setYearRange}
         prefixButtonClass={prefixButtonClass}

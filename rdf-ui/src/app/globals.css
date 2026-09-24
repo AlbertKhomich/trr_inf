@@ -2,8 +2,11 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --trr-navy: #1c2d66;
+  --trr-gray: #d5d5cf;
+  --trr-lime: #c8df00;
+  --background: #fafaf8;
+  --foreground: #1c2d66;
 }
 
 html {
@@ -11,27 +14,32 @@ html {
 }
 
 html.light {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #fafaf8;
+  --foreground: #1c2d66;
   color-scheme: light;
 }
 
 html.dark {
-  --background: #0a0a0a;
+  --background: #10182d;
   --foreground: #ededed;
   color-scheme: dark;
 }
 
 @theme inline {
+  --color-blue-400: #a9c5e8;
+  --color-blue-500: #417fc4;
+  --color-blue-600: #1c2d66;
+  --color-green-500: #839200;
+  --color-green-600: #657200;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: "Meta Pro", "Trebuchet MS", Arial, sans-serif;
+  --font-mono: "Courier New", monospace;
 }
 
 @media (prefers-color-scheme: dark) {
   html:not(.light):not(.dark) {
-    --background: #0a0a0a;
+    --background: #10182d;
     --foreground: #ededed;
   }
 }
@@ -39,38 +47,7 @@ html.dark {
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
-}
-
-.graph-background {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  overflow: hidden;
-  pointer-events: none;
-  background: #f8fafc;
-}
-
-.graph-background__canvas,
-.graph-background__center,
-.graph-background__vignette {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-}
-
-.graph-background__center {
-  background: radial-gradient(ellipse 47% 68% at 50% 48%,
-      rgba(248, 250, 252, 0.94) 0%,
-      rgba(248, 250, 252, 0.72) 48%,
-      transparent 82%);
-}
-
-.graph-background__vignette {
-  background:
-    radial-gradient(ellipse at center, transparent 52%, rgba(69, 89, 119, 0.08) 100%),
-    linear-gradient(to bottom, rgba(248, 250, 252, 0.35), transparent 18%, transparent 82%, rgba(248, 250, 252, 0.4));
+  font-family: var(--font-sans);
 }
 
 .app-content {
@@ -79,43 +56,70 @@ body {
   min-height: 100vh;
 }
 
-.dark .graph-background {
-  background: #080b10;
+.trr-background {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: var(--background);
 }
 
-.dark .graph-background__center {
-  background: radial-gradient(ellipse 47% 68% at 50% 48%,
-      rgba(8, 11, 16, 0.95) 0%,
-      rgba(8, 11, 16, 0.76) 48%,
-      transparent 82%);
+.trr-background::after {
+  content: "";
+  position: absolute;
+  right: -130px;
+  bottom: -100px;
+  width: min(45vw, 520px);
+  aspect-ratio: 1;
+  background: url("/trr-symbol.png") center / contain no-repeat;
+  opacity: 0.08;
 }
 
-.dark .graph-background__vignette {
-  background:
-    radial-gradient(ellipse at center, transparent 48%, rgba(0, 2, 7, 0.48) 100%),
-    linear-gradient(to bottom, rgba(8, 11, 16, 0.38), transparent 18%, transparent 82%, rgba(8, 11, 16, 0.48));
+.trr-header {
+  padding-block: 12px 28px;
+  border-bottom: 1px solid var(--trr-gray);
 }
 
-@media (prefers-color-scheme: dark) {
-  html:not(.light):not(.dark) .graph-background {
-    background: #080b10;
-  }
+.trr-logo-link { flex-shrink: 0; }
+.trr-logo { width: clamp(200px, 30vw, 320px); }
 
-  html:not(.light):not(.dark) .graph-background__center {
-    background: radial-gradient(ellipse 47% 68% at 50% 48%,
-        rgba(8, 11, 16, 0.95) 0%,
-        rgba(8, 11, 16, 0.76) 48%,
-        transparent 82%);
-  }
-
-  html:not(.light):not(.dark) .graph-background__vignette {
-    background:
-      radial-gradient(ellipse at center, transparent 48%, rgba(0, 2, 7, 0.48) 100%),
-      linear-gradient(to bottom, rgba(8, 11, 16, 0.38), transparent 18%, transparent 82%, rgba(8, 11, 16, 0.48));
-  }
+.trr-intro {
+  position: relative;
+  overflow: hidden;
+  margin-block: 16px 28px;
+  padding: 32px;
+  border-left: 6px solid var(--trr-lime);
+  border-radius: 0 24px 24px 0;
+  background: var(--trr-navy);
+  color: white;
 }
 
-/* Create-account palette, matched to the graphite and electric-blue mockup. */
+.trr-intro::after {
+  content: "";
+  position: absolute;
+  width: 210px;
+  height: 210px;
+  right: -75px;
+  top: -100px;
+  background: url("/trr-dialogue.png") center / contain no-repeat;
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.trr-eyebrow {
+  margin-bottom: 18px;
+  color: var(--trr-lime);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+@media (max-width: 480px) {
+  .trr-intro { padding: 24px 20px; }
+  .trr-header { align-items: flex-start; }
+}
+
+/* Account and legal pages share the TRR palette. */
 .register-page {
   background: transparent;
 }
@@ -132,7 +136,7 @@ body {
 }
 
 .register-input:focus {
-  border-color: #3478f6;
+  border-color: var(--trr-navy);
   box-shadow: 0 0 0 4px rgba(52, 120, 246, 0.12);
 }
 
@@ -147,7 +151,7 @@ body {
 }
 
 .register-link {
-  color: #2878e8;
+  color: var(--trr-navy);
 }
 
 .dark .register-page {
@@ -183,7 +187,7 @@ body {
 }
 
 .dark .register-input:focus {
-  border-color: #3478f6;
+  border-color: var(--trr-navy);
   box-shadow: 0 0 0 4px rgba(52, 120, 246, 0.13), 0 0 24px rgba(34, 89, 230, 0.08);
 }
 
@@ -203,7 +207,7 @@ body {
 .dark .register-checkbox {
   border-color: #666c77;
   background: #101114;
-  accent-color: #3478f6;
+  accent-color: var(--trr-navy);
 }
 
 .dark .register-legal {
@@ -232,7 +236,7 @@ body {
 }
 
 .dark .register-link {
-  color: #3e91ff;
+  color: #b0c8ec;
 }
 
 /* .dark .register-page header a,
@@ -253,7 +257,7 @@ body {
 
 .legal-register-palette main>section a,
 .legal-register-palette main>article a {
-  color: #2878e8;
+  color: var(--trr-navy);
 }
 
 .dark .legal-register-palette main>section,
@@ -268,7 +272,7 @@ body {
 
 .dark .legal-register-palette main>section a,
 .dark .legal-register-palette main>article a {
-  color: #3e91ff;
+  color: #b0c8ec;
 }
 
 .mode-panel-enter {
@@ -401,3 +405,18 @@ body {
 .country-popularity-popup.country-popularity-popup--dark.maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip {
   border-top-color: rgba(2, 8, 23, 0.96);
 }
+.register-submit,
+.dark .register-submit {
+  border-color: var(--trr-navy);
+  background: var(--trr-navy);
+  color: white;
+  box-shadow: none;
+}
+.register-submit:hover,
+.dark .register-submit:hover {
+  background: #2a407e;
+}
+.dark .register-input:focus {
+  border-color: var(--trr-lime);
+}
+.dark .register-checkbox { accent-color: var(--trr-lime); }

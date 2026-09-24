@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { bodyErrorMessage, toErrorMessage } from "@/lib/errors";
 import { assignAuthorNameByIriVariants } from "@/lib/query";
 import type { PaperDetails, SearchItem, SearchResponse } from "@/lib/types";
@@ -12,7 +12,7 @@ type UseSearchStateArgs = {
   debouncedAuthorIri: string | null;
   yearFrom: string;
   yearTo: string;
-  trr318Enabled: boolean;
+  enabled: boolean;
 };
 
 function dedupeByIri(items: SearchItem[]): SearchItem[] {
@@ -58,7 +58,7 @@ async function toFriendlyHttpError(response: Response, fallback: string): Promis
   return `${fallback} (HTTP ${response.status})`;
 }
 
-export function useSearchState({ debouncedQuery, debouncedAuthorIri, yearFrom, yearTo, trr318Enabled }: UseSearchStateArgs) {
+export function useSearchState({ debouncedQuery, debouncedAuthorIri, yearFrom, yearTo, enabled }: UseSearchStateArgs) {
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
   const [items, setItems] = useState<SearchItem[]>([]);
@@ -76,10 +76,7 @@ export function useSearchState({ debouncedQuery, debouncedAuthorIri, yearFrom, y
 
   const [knownAuthorNames, setKnownAuthorNames] = useState<Record<string, string>>({});
 
-  const canSearch = useMemo(
-    () => debouncedQuery.trim().length >= 3 || Boolean(yearFrom || yearTo || trr318Enabled),
-    [debouncedQuery, yearFrom, yearTo, trr318Enabled],
-  );
+  const canSearch = enabled && debouncedQuery.trim().length > 0;
 
   const fetchSearchPage = useCallback(
     async (cursor: string | null): Promise<SearchResponse> => {
@@ -90,7 +87,7 @@ export function useSearchState({ debouncedQuery, debouncedAuthorIri, yearFrom, y
       if (cursor) params.set("cursor", cursor);
       if (yearFrom) params.set("yearFrom", yearFrom);
       if (yearTo) params.set("yearTo", yearTo);
-      if (trr318Enabled) params.set("trr318", "true");
+      params.set("trr318", "true");
 
       const response = await fetch(`/api/search?${params.toString()}`);
       if (!response.ok) throw new Error(await toFriendlyHttpError(response, "Search failed"));
@@ -102,7 +99,7 @@ export function useSearchState({ debouncedQuery, debouncedAuthorIri, yearFrom, y
 
       return (await response.json()) as SearchResponse;
     },
-    [debouncedQuery, yearFrom, yearTo, trr318Enabled],
+    [debouncedQuery, yearFrom, yearTo],
   );
 
   useEffect(() => {
@@ -115,6 +112,8 @@ export function useSearchState({ debouncedQuery, debouncedAuthorIri, yearFrom, y
       setDetailsLoading({});
 
       if (!canSearch) {
+        setLoading(false);
+        setLoadingMore(false);
         setItems([]);
         setSearchTotal(0);
         setNextCursor(null);

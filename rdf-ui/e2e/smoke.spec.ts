@@ -75,25 +75,14 @@ function matchesApiRequest(url: string, path: string, params?: Record<string, st
 }
 
 test("search, open details, country filter, load more, and theme persistence", async ({ page }) => {
-  await page.route("**/api/top-countries**", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        rows: {
-          totalPapers: 12,
-          rows: [
-            { name: "US", value: 6 },
-            { name: "DE", value: 4 },
-            { name: "FR", value: 2 },
-          ],
-        },
-      }),
-    });
+  const statsRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/top-countries")) statsRequests.push(request.url());
   });
 
   await page.route("**/api/search**", async (route) => {
     const url = new URL(route.request().url());
+    expect(url.searchParams.get("trr318")).toBe("true");
     const q = url.searchParams.get("q") ?? "";
     const cursor = url.searchParams.get("cursor") ?? "";
 
@@ -160,7 +149,12 @@ test("search, open details, country filter, load more, and theme persistence", a
     });
   });
 
+  await page.route("**/api/auth/session", (route) => route.fulfill({ json: {} }));
   await page.goto("/");
+  await expect(page.getByRole("img", { name: "TRR 318 — Constructing Explainability" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "TRR 318", exact: true })).toHaveCount(0);
+  await expect(page.locator("footer img")).toHaveAttribute("alt", "DICE research group");
+
 
   const searchInput = page.getByPlaceholder("Search paper title... (a:, aff:, c:)");
   const firstSearchResponse = page.waitForResponse(
@@ -199,10 +193,12 @@ test("search, open details, country filter, load more, and theme persistence", a
         limit: "25",
       }),
   );
-  await page.getByRole("button", { name: /United States \(US\)/ }).click();
+  await searchInput.fill("c: US");
   await filteredSearchResponse;
   await expect(searchInput).toHaveValue("c: US");
   await expect(page.getByText("US Filtered Result")).toBeVisible();
+
+  expect(statsRequests).toEqual([]);
 
   const themeToggle = page.getByRole("button", { name: /Switch to (light|dark) theme/ });
   const labelBefore = await themeToggle.getAttribute("aria-label");

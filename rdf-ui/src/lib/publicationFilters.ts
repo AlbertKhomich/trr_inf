@@ -10,3 +10,13 @@ export function excludeSammelbandPattern(paperVar = "?paper"): string {
     }
   `;
 }
+
+/** Fixed publication scope for the TRR application. */
+export function trr318Pattern(paperVar = "?paper"): string {
+  return `
+    FILTER EXISTS {
+      ${paperVar} <https://schema.org/keywords> ?trr318Keyword .
+      FILTER(CONTAINS(LCASE(STR(?trr318Keyword)), "trr_318"))
+    }
+  `;
+}
