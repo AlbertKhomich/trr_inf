@@ -229,7 +229,7 @@ export default function SearchControls(props: SearchControlsProps) {
           <>
             {showWorking && (
               <div className="flex items-center gap-2 text-sm text-gray-500">
-                <BeatLoader color="#22c55e" size={8} speedMultiplier={0.85} />
+                <BeatLoader color="var(--color-green-500)" size={8} speedMultiplier={0.85} />
                 <span>Working...</span>
               </div>
             )}

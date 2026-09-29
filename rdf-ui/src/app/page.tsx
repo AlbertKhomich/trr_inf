@@ -228,7 +228,7 @@ export default function HomePage() {
   const [q, setQ] = useState("");
   const [yearRange, setYearRange] = useState<SearchYearRange>(["", ""]);
   const [describeIri, setDescribeIri] = useState<string | null>(null);
-  const [aiEnabled, setAiEnabled] = useState(false);
+  const [aiEnabled, setAiEnabled] = useState(true);
   const [aiDocumentStatus, setAiDocumentStatus] = useState<RagDocumentStatus>("idle");
   const [aiAnswer, setAiAnswer] = useState("");
   const [aiError, setAiError] = useState<string | null>(null);
